@@ -163,6 +163,8 @@ class LlamaConfig(PretrainedConfig):
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
+        final_logit_softcapping=30.0,
+        latent_type: str = "concat_seq",
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -187,6 +189,15 @@ class LlamaConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
+        
+        self.final_logit_softcapping = final_logit_softcapping
+        # assert latent_type in ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], (
+        #     f"Latent type must be one of ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], got {latent_type}")
+        # latent_layer_ratio: float = 0.5,
+        assert latent_type in ["concat_seq"], (
+            f"Latent type must be one of ['concat_seq'], got {latent_type}"
+        )
+        self.latent_type = latent_type
 
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, move it to 'rope_type'.

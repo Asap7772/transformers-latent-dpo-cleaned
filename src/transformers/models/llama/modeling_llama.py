@@ -369,6 +369,10 @@ class LlamaAttention(nn.Module):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
+        # Softcapping the logits to avoid numerical instability (Gemma2/Gemini 1.5)
+        if self.config.final_logit_softcapping > 0:
+            attn_weights = self.config.final_logit_softcapping * torch.tanh(attn_weights/self.config.final_logit_softcapping)
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -511,6 +515,7 @@ class LlamaFlashAttention2(LlamaAttention):
             sliding_window=getattr(self, "sliding_window", None),
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
             is_causal=self.is_causal,
+            softcap=self.config.final_logit_softcapping,
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -874,6 +879,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        latents: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -892,9 +898,28 @@ class LlamaModel(LlamaPreTrainedModel):
                 "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
             )
             use_cache = False
-
+        
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        
+        if self.config.latent_type == 'concat_seq' and latents is not None:
+            latents = latents.unsqueeze(1)
+            
+            assert latents.ndim == 3, f"Latents must be a tensor of shape (batch_size, 1, hidden_size), got {latents.shape}"
+            assert inputs_embeds.ndim == 3, f"Input embeddings must be a tensor of shape (batch_size, seq_len, hidden_size), got {inputs_embeds.shape}"
+            assert latents.shape[0] == inputs_embeds.shape[0], f"Latents batch size ({latents.shape[0]}) must match the input batch size ({inputs_embeds.shape[0]})"
+            assert latents.shape[2] == inputs_embeds.shape[2], f"Latents hidden size ({latents.shape[2]}) must match the input hidden size ({inputs_embeds.shape[2]})"
+            inputs_embeds = torch.cat([latents, inputs_embeds], dim=1)
+
+            # alter attention mask to account for latents
+            if attention_mask is not None:
+                attention_mask = torch.cat([torch.ones_like(latents[:, :, 0]), attention_mask], dim=1)
+                assert inputs_embeds.shape[1] == attention_mask.shape[1], f"Input embeddings length ({inputs_embeds.shape[1]}) must match the attention mask length ({attention_mask.shape[1]})"
+
+            # reset position_ids
+            if position_ids is not None:
+                position_ids = torch.cat([torch.zeros(position_ids.shape[0], 1, dtype=position_ids.dtype, device=position_ids.device), position_ids + 1], dim=1)
+                assert inputs_embeds.shape[1] == position_ids.shape[1], f"Input embeddings length ({inputs_embeds.shape[1]}) must match the position_ids length ({position_ids.shape[1]})"
 
         return_legacy_cache = False
         if (
@@ -1109,6 +1134,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        latents: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1153,6 +1179,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            latents=latents,
         )
 
         hidden_states = outputs[0]
@@ -1162,6 +1189,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             logits = torch.cat(logits, dim=-1)
         else:
             logits = self.lm_head(hidden_states)
+        
+        if self.config.latent_type == 'concat_seq' and latents is not None:
+            # remove the latents from the logits
+            logits = logits[:, 1:]
+
         logits = logits.float()
 
         loss = None
@@ -1278,6 +1310,7 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        latents: Optional[torch.FloatTensor] = None, 
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1297,6 +1330,7 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            latents=latents,
         )
         hidden_states = transformer_outputs[0]
         logits = self.score(hidden_states)
@@ -1395,6 +1429,7 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        latents: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, QuestionAnsweringModelOutput]:
         r"""
         start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1417,6 +1452,7 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            latents=latents,
         )
 
         sequence_output = outputs[0]
@@ -1499,6 +1535,7 @@ class LlamaForTokenClassification(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        latents: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, TokenClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1518,6 +1555,7 @@ class LlamaForTokenClassification(LlamaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            latents=latents,
         )
         sequence_output = outputs[0]
         sequence_output = self.dropout(sequence_output)
