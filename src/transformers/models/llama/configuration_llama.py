@@ -163,6 +163,7 @@ class LlamaConfig(PretrainedConfig):
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
+        attn_logit_softcapping=50.0,
         final_logit_softcapping=30.0,
         latent_type: str = "concat_seq",
         **kwargs,
@@ -190,6 +191,7 @@ class LlamaConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
         
+        self.attn_logit_softcapping = attn_logit_softcapping
         self.final_logit_softcapping = final_logit_softcapping
         # assert latent_type in ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], (
         #     f"Latent type must be one of ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], got {latent_type}")

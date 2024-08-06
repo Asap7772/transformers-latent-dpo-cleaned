@@ -52,6 +52,7 @@ class Gemma2Config(GemmaConfig):
         query_pre_attn_scalar=224,
         sliding_window=4096,
         final_logit_softcapping=30.0,
+        latent_type: str = "concat_seq",
         **super_kwargs,
     ):
         super().__init__(self, **super_kwargs)
@@ -59,6 +60,14 @@ class Gemma2Config(GemmaConfig):
         self.sliding_window = sliding_window
         self.cache_implementation = "hybrid"
         self.final_logit_softcapping = final_logit_softcapping
+        
+        # assert latent_type in ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], (
+        #     f"Latent type must be one of ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], got {latent_type}")
+        # latent_layer_ratio: float = 0.5,
+        assert latent_type in ["concat_seq"], (
+            f"Latent type must be one of ['concat_seq'], got {latent_type}"
+        )
+        self.latent_type = latent_type
 
 
 class Gemma2RMSNorm(GemmaRMSNorm):
@@ -338,6 +347,7 @@ class Gemma2Model(GemmaModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        latents: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -359,6 +369,25 @@ class Gemma2Model(GemmaModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+            
+        if self.config.latent_type == 'concat_seq' and latents is not None:
+            latents = latents.unsqueeze(1)
+            
+            assert latents.ndim == 3, f"Latents must be a tensor of shape (batch_size, 1, hidden_size), got {latents.shape}"
+            assert inputs_embeds.ndim == 3, f"Input embeddings must be a tensor of shape (batch_size, seq_len, hidden_size), got {inputs_embeds.shape}"
+            assert latents.shape[0] == inputs_embeds.shape[0], f"Latents batch size ({latents.shape[0]}) must match the input batch size ({inputs_embeds.shape[0]})"
+            assert latents.shape[2] == inputs_embeds.shape[2], f"Latents hidden size ({latents.shape[2]}) must match the input hidden size ({inputs_embeds.shape[2]})"
+            inputs_embeds = torch.cat([latents, inputs_embeds], dim=1)
+
+            # alter attention mask to account for latents
+            if attention_mask is not None:
+                attention_mask = torch.cat([torch.ones_like(latents[:, :, 0]), attention_mask], dim=1)
+                assert inputs_embeds.shape[1] == attention_mask.shape[1], f"Input embeddings length ({inputs_embeds.shape[1]}) must match the attention mask length ({attention_mask.shape[1]})"
+
+            # reset position_ids
+            if position_ids is not None:
+                position_ids = torch.cat([torch.zeros(position_ids.shape[0], 1, dtype=position_ids.dtype, device=position_ids.device), position_ids + 1], dim=1)
+                assert inputs_embeds.shape[1] == position_ids.shape[1], f"Input embeddings length ({inputs_embeds.shape[1]}) must match the position_ids length ({position_ids.shape[1]})"
 
         if cache_position is None:
             cache_position = torch.arange(0, inputs_embeds.shape[1], device=inputs_embeds.device)
@@ -490,6 +519,7 @@ class Gemma2ForCausalLM(GemmaForCausalLM):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        latents: Optional[torch.FloatTensor] = None, 
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -534,6 +564,7 @@ class Gemma2ForCausalLM(GemmaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            latents=latents,
         )
 
         hidden_states = outputs[0]
@@ -542,6 +573,10 @@ class Gemma2ForCausalLM(GemmaForCausalLM):
             logits = logits / self.config.final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * self.config.final_logit_softcapping
+            
+        if self.config.latent_type == 'concat_seq' and latents is not None:
+            # remove the latents from the logits
+            logits = logits[:, 1:]
 
         logits = logits.float()
         loss = None

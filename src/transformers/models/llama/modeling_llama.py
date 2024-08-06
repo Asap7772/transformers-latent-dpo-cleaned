@@ -424,8 +424,10 @@ class LlamaAttention(nn.Module):
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
         
         # Softcapping the logits to avoid numerical instability (Gemma2/Gemini 1.5)
-        if self.config.final_logit_softcapping > 0:
-            attn_weights = self.config.final_logit_softcapping * torch.tanh(attn_weights/self.config.final_logit_softcapping)
+        if self.config.attn_logit_softcapping > 0:
+            attn_weights = attn_weights / self.config.attn_logit_softcapping
+            attn_weights = torch.tanh(attn_weights)
+            attn_weights = attn_weights * self.config.attn_logit_softcapping
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -568,7 +570,7 @@ class LlamaFlashAttention2(LlamaAttention):
             sliding_window=getattr(self, "sliding_window", None),
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
             is_causal=self.is_causal,
-            softcap=self.config.final_logit_softcapping,
+            softcap=self.config.attn_logit_softcapping,
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -973,6 +975,7 @@ class LlamaModel(LlamaPreTrainedModel):
             if position_ids is not None:
                 position_ids = torch.cat([torch.zeros(position_ids.shape[0], 1, dtype=position_ids.dtype, device=position_ids.device), position_ids + 1], dim=1)
                 assert inputs_embeds.shape[1] == position_ids.shape[1], f"Input embeddings length ({inputs_embeds.shape[1]}) must match the position_ids length ({position_ids.shape[1]})"
+                cache_position = position_ids.squeeze(0) if cache_position is not None else None
 
         return_legacy_cache = False
         if (
@@ -1233,6 +1236,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             logits = torch.cat(logits, dim=-1)
         else:
             logits = self.lm_head(hidden_states)
+
+        if self.config.final_logit_softcapping is not None:
+            logits = logits / self.config.final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * self.config.final_logit_softcapping
         
         if self.config.latent_type == 'concat_seq' and latents is not None:
             # remove the latents from the logits

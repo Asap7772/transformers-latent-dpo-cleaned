@@ -1,10 +1,10 @@
 import torch
 import os
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM, Gemma2ForCausalLM
 
-model_type = 'llama'
-model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-model_type = LlamaForCausalLM
+model_type = 'gemma'
+model_name = "google/gemma-2-2b"
+model_type = Gemma2ForCausalLM
 
 shared_kwargs = dict(
     cache_dir=os.path.expanduser("~/.cache/"),
@@ -19,7 +19,7 @@ print('--' * 20)
 
 for latent_type in ['concat_seq']:
     print(f"Latent type: {latent_type}")
-    config = AutoConfig.from_pretrained(model_name, **shared_kwargs)
+    config = AutoConfig.from_pretrained(model_name, **shared_kwargs, attn_implementation='eager')
     
     assert hasattr(config, 'num_hidden_layers') 
     assert hasattr(config, 'latent_type')

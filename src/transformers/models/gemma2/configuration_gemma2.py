@@ -120,6 +120,7 @@ class Gemma2Config(PretrainedConfig):
         attn_logit_softcapping=50.0,
         query_pre_attn_scalar=224,
         sliding_window=4096,
+        latent_type: str = "concat_seq",
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -138,7 +139,15 @@ class Gemma2Config(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.attn_logit_softcapping = attn_logit_softcapping
-
+        
+        # assert latent_type in ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], (
+        #     f"Latent type must be one of ['residual', 'concat_seq', 'concat_emb', 'res_concat_emb'], got {latent_type}")
+        # latent_layer_ratio: float = 0.5,
+        assert latent_type in ["concat_seq"], (
+            f"Latent type must be one of ['concat_seq'], got {latent_type}"
+        )
+        self.latent_type = latent_type
+        
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
